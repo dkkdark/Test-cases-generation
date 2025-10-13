@@ -1,0 +1,10 @@
+langchain==0.3.27
+langchain_core==0.3.72
+langchain_openai==0.3.28
+langgraph==0.6.3
+mcp==1.12.3
+openai==1.98.0
+python-dotenv==1.1.1
+streamlit==1.47.1
+chromadb==0.6.1
+langchain-community==0.3.27
