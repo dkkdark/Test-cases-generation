@@ -4,7 +4,7 @@ from mcp.client.sse import sse_client
 
 class Config:
     class Server:
-        HOST = "0.0.0.0"
+        HOST = "localhost"
         PORT = 8000
         SSE_PATH = "/sse"
         TRANSPORT = "sse"
