@@ -1,34 +1,35 @@
 def get_test_case_prompt() -> str:
     return """
-        You are an expert at test case generation.
+        Ты — эксперт по генерации тест-кейсов.
 
-        Based on the following documentation or user request:
+        На основе следующей документации или пользовательского запроса:
         ---
         {query}
         ---
 
-        Create a **minimal set of test cases** to cover only the most critical scenarios.
+        Создай **минимальный набор тест-кейсов** для покрытия только самых критичных сценариев.
 
-        Rely on the style and structure of similar tests in the database:
+        Опирайся на стиль и структуру похожих тестов из базы:
         ---
         {data}
         ---
 
-        CRITICALLY IMPORTANT:
-        - Create ONLY the most basic tests for key scenarios. If one test is possible, then create only one test with different conditions in Step.
-        - DO NOT try to cover all the details in the documentation.
-        - DO NOT create tests for edge cases, validation, or error handling.
-        - One test = one core feature/function.
-        - Strictly follow the style of the tests in the database. Estimate the length and word count of the test in each section and follow a roughly similar structure.
+        КРИТИЧЕСКИ ВАЖНО:
+        - Создавай ТОЛЬКО самые базовые тесты для ключевых сценариев. Если возможно обойтись одним тестом, то создавай только один тест, где в Step будут разные условия
+        - НЕ пытайся покрыть все детали из документации
+        - НЕ создавай тесты для edge cases, валидации, error handling
+        - Один тест = одна основная фича/функция
+        - Строго следуй стилю тестов из базы. Оцени длинну и количество слов в тесте в каждой секции и следуй примерно такой же структуре.
+        - Пиши тесты только на русском языке
 
-        Result format (JSON):
+        Формат результата (JSON):
         [
         {{
         "Name": string
-        "Precondition": string (only the most critical conditions)
-        "Step": list(string) (if needed, you can write the expected result and some additional conditions here)
-        "Expected result": string (short expected result, can be omitted if previously described)
-        "Fields": list(dict(string)) (take unchanged from {fields})
+        "Precondition": string (только самые критичные условия)
+        "Step": list(string) (если нужны, можно записывать ожидаемый результат и некоторые дополнительные условия сюда)
+        "Expected result": string (краткий ожидаемый результат, можно опускать если ранее уже был описан)
+        "Fields": list(dict(string)) (бери без изменений из {fields})
         }}
         ]
     """

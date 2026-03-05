@@ -13,7 +13,7 @@ class Vector:
         provider = os.getenv("EMBEDDINGS_PROVIDER", "openai").lower()
         if provider == "ollama":
             self.embeddings = OllamaEmbeddings(
-                model="mxbai-embed-large",
+                model=os.getenv("EMBEDDING_MODEL"),
                 base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
             )
         else:
@@ -47,18 +47,44 @@ class Vector:
 
     def _to_text(self, tc: dict) -> str:
         fields = tc.get('fields', [])
+        
+        field_dict = {}
         if isinstance(fields, list):
+            for item in fields:
+                if isinstance(item, dict):
+                    field_name = item.get('fieldName', '')
+                    field_value = item.get('fieldValue', '')
+                    if field_name and field_value:
+                        field_dict[field_name] = field_value
             formatted_fields = '; '.join(
-                f"{item.get('fieldName')}: {item.get('fieldValue')}" if isinstance(item, dict) else str(item)
-                for item in fields
+                f"{name}: {value}" for name, value in field_dict.items()
             )
         else:
             formatted_fields = str(fields)
+            field_dict = fields if isinstance(fields, dict) else {}
+
+        product = field_dict.get('Product', '')
+        epic = field_dict.get('Epic', '')
+        feature = field_dict.get('Feature', '')
+        component = field_dict.get('Component', '')
+        
+        signature_parts = []
+        if product:
+            signature_parts.append(f"Product: {product}")
+        if epic:
+            signature_parts.append(f"Epic: {epic}")
+        if feature:
+            signature_parts.append(f"Feature: {feature}")
+        if component:
+            signature_parts.append(f"Component: {component}")
+        
+        signature = " | ".join(signature_parts) if signature_parts else ""
 
         return f"""
+        {signature}
+        Fields: {formatted_fields}
         Name: {tc['name']}
         Precondition: {tc['precondition']}
         Steps: {'; '.join(tc['steps'])}
         Expected result: {tc['expectedResult']}
-        Fields: {formatted_fields}
         """

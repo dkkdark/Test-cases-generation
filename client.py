@@ -2,7 +2,8 @@ import asyncio
 import streamlit as st
 import json
 import re
-from config import connect_to_server
+import requests
+from config import Config
 import traceback
 
 st.title("Test Case Creation Tool")
@@ -21,26 +22,24 @@ init_session_state()
 
 async def call_tool(tool_name: str, args: dict | None = None, query_text: str = ""):
     try:
-        async with connect_to_server() as session:
-            if tool_name == "get_test_case":
-                result = await session.call_tool(
-                    "get_test_case",
-                    arguments={"query": query_text}
-                )
-                return result.structuredContent.get("result")
-
-            elif tool_name == "load_test_cases_from_allure":
-                result = await session.call_tool("load_test_cases_from_allure", arguments={})
-                return result.structuredContent.get("result")
-
-            elif tool_name == "save_allure_test_cases":
-                result = await session.call_tool("save_allure_test_cases", arguments={})
-                return result.structuredContent.get("result")
-
-            elif tool_name == "create_test_case":
-                args = args or {}
-                result = await session.call_tool("create_test_case", arguments=args)
-                return result.structuredContent.get("result")
+        base = f"http://{Config.Server.HOST}:{Config.Server.PORT}"
+        if tool_name == "get_test_case":
+            resp = requests.post(f"{base}/get_test_case", json={"query": query_text})
+            resp.raise_for_status()
+            return (resp.json() or {}).get("result")
+        elif tool_name == "load_test_cases_from_allure":
+            resp = requests.post(f"{base}/load_test_cases_from_allure", json={})
+            resp.raise_for_status()
+            return (resp.json() or {}).get("result")
+        elif tool_name == "save_allure_test_cases":
+            resp = requests.post(f"{base}/save_allure_test_cases", json={})
+            resp.raise_for_status()
+            return (resp.json() or {}).get("result")
+        elif tool_name == "create_test_case":
+            args = args or {}
+            resp = requests.post(f"{base}/create_test_case", json=args)
+            resp.raise_for_status()
+            return (resp.json() or {}).get("result")
     except Exception as e:
         print(f"call_tool error for {tool_name}: {e}")
         print(traceback.format_exc())

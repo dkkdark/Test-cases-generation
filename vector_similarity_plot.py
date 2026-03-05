@@ -25,7 +25,7 @@ def extract_epic_from_text(text):
     return "Unknown"
 
 
-epic_labels = [extract_epic_from_text(doc) for doc in documents]
+epic_labels = [extract_epic_from_text(doc)[:15] for doc in documents]
 
 hover_texts = [
     f"Epic: {epic_labels[i]}<br>Doc: {documents[i][:150]}..." if len(documents[i]) > 150

@@ -1,5 +1,8 @@
 import json
 import os
+from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
+import uvicorn
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
 from langchain_ollama import ChatOllama 
@@ -82,11 +85,10 @@ class TestCaseService:
         try:
             vectorstore = self.vector.get_db()
             similar_questions = vectorstore.similarity_search_with_score(query, k=10)
-            fd = vectorstore.similarity_search_with_vectors(query, k=10)
+            print(similar_questions)
             inferred_fields = self._infer_fields_from_similar_questions(similar_questions)
             result = self.chain.invoke({"query": query, "data": similar_questions, "fields": inferred_fields}).content
             print("Generated test case result:")
-            print(result)
             return result
         except Exception as e:
             return f"Error: {str(e)}"
@@ -156,5 +158,53 @@ def create_test_case(name: str, precondition: str, steps: list[str], expected_re
     )
 
 
+app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+@app.post("/get_test_case")
+async def http_get_test_case(request: Request):
+    data = await request.json()
+    query_text = data.get("query", "")
+    result = test_case_service.get_test_case(query_text)
+    print(result)
+    return {"result": result}
+
+@app.post("/load_test_cases_from_allure")
+async def http_load_test_cases_from_allure():
+    result = test_case_service.load_test_cases_from_allure()
+    return {"result": result}
+
+@app.post("/save_allure_test_cases")
+async def http_save_allure_test_cases():
+    result = test_case_service.save_allure_test_cases()
+    return {"result": result}
+
+@app.post("/create_test_case")
+async def http_create_test_case(request: Request):
+    data = await request.json()
+    args = {
+        "name": data.get("name", ""),
+        "precondition": data.get("precondition", ""),
+        "steps": data.get("steps", []),
+        "expected_result": data.get("expected_result", ""),
+        "fields": data.get("fields", []),
+    }
+    result = test_case_service.create_test_case(
+        name=args["name"],
+        precondition=args["precondition"],
+        steps=args["steps"],
+        expected_result=args["expected_result"],
+        fields=args["fields"],
+    )
+    return {"result": result}
+
+
 if __name__ == "__main__":
-    mcp.run(transport=Config.Server.TRANSPORT)
+    uvicorn.run("main:app", host=Config.Server.HOST, port=Config.Server.PORT, reload=False)
