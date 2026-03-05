@@ -1,0 +1,14 @@
+To run localy:
+1. Download ollama and two recommended models: gpt-oss:20b-cloud and nomic-embed-text
+
+2. Specify env variables
+Defaults for ollama run:
+    USER_TOKEN=<allure-api-key>
+    EMBEDDINGS_PROVIDER=ollama
+    LLM_PROVIDER=ollama
+    OLLAMA_BASE_URL=http://localhost:11434
+    OLLAMA_MODEL=gpt-oss:20b-cloud
+    BASE_URL=<allure-url>
+
+3. run python main.py
+5. run streamlit run client.py or use Chrome pluggin to interact with the service
