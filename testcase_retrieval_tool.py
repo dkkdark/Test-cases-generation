@@ -298,7 +298,7 @@ class CreateTestCaseTool(_JWTAuthTool):
         print(f"custom_fields {custom_fields}")
 
         payload: Dict[str, Any] = {
-            "automated": True,
+            "automated": False,
             "name": name,
             "precondition": precondition or "",
             "expectedResult": expected_result or "",
