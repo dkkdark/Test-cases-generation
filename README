@@ -12,3 +12,24 @@ Defaults for ollama run:
 
 3. run python main.py
 5. run streamlit run client.py or use Chrome pluggin to interact with the service
+
+Allure MCP server integration (separate from legacy API logic):
+1. Install and build https://github.com/armanayvazyan/allure-testops-mcp
+2. Set env vars for MCP server:
+    ALLURE_MCP_COMMAND=node
+    ALLURE_MCP_ARGS="/path/to/allure-testops-mcp/dist/index.js"
+    ALLURE_MCP_CWD=/path/to/allure-testops-mcp
+    ALLURE_TESTOPS_URL=<allure-url>
+    ALLURE_TOKEN=<allure-api-key>
+    ALLURE_PROJECT_ID=<id>
+    ALLURE_TREE_ID=<id>
+    ALLURE_PROJECT_NAME=<project-name>
+3. Use MCP endpoints/tools:
+    /get_test_case_mcp
+    /load_test_cases_from_allure_mcp
+    /create_test_case_mcp
+    /rebuild_fts_index_mcp
+
+FTS index (lightweight search):
+- Build index via /rebuild_fts_index_mcp (or MCP tool rebuild_fts_index_mcp)
+- Generation uses FTS ids first, then fetches full details via MCP
