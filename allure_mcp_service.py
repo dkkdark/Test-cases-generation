@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import shlex
+import shutil
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional
 from contextlib import asynccontextmanager
@@ -70,6 +71,11 @@ class AllureMCPClient:
 
     def _load_config(self) -> AllureMCPServerConfig:
         command = os.getenv("ALLURE_MCP_COMMAND", "node")
+        resolved = shutil.which(command)
+        if resolved:
+            command = resolved
+        else:
+            print(f"[MCP] WARNING: command '{command}' not found in PATH")
         args = _parse_args(os.getenv("ALLURE_MCP_ARGS", ""))
         cwd = os.getenv("ALLURE_MCP_CWD")
         env = _build_env()
