@@ -158,8 +158,14 @@ class TestCaseService:
                 fields=fields,
             )
             return "Test case was successfully created!"
-        except Exception as e:
-            print(f"Error creating test case: {e}")
+        except BaseException as e:
+            sub_exceptions = getattr(e, "exceptions", None)
+            if sub_exceptions:
+                for i, sub in enumerate(sub_exceptions):
+                    print(f"[MCP] create_test_case: sub-exception[{i}]: {sub!r}")
+            print(f"Error creating test case: {e!r}")
+            import traceback
+            traceback.print_exc()
             return f"Error: {str(e)}"
 
 

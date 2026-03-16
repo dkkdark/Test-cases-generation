@@ -326,6 +326,74 @@ class AllureMCPService:
             if field.get("name") and (field.get("customField") or {}).get("name")
         ]
 
+    CF_ID_MAP = {
+        "Product": 9,
+        "Epic": -1,
+        "Feature": -2,
+        "Story": -3,
+        "Component": -4,
+        "Issue": 17,
+    }
+
+    PRODUCT_VALUE_ID = 10152
+
+    def _fetch_cfv_options(self, custom_field_id: int) -> List[Dict[str, Any]]:
+        project_id = self._project_id or 2
+        url = f"{self._base_url}/api/project/{project_id}/cfv?customFieldId={custom_field_id}&size=350"
+        resp = requests.get(url, headers=self._api_headers(), verify=False)
+        resp.raise_for_status()
+        data = resp.json()
+        return data.get("content", []) if isinstance(data, dict) else data if isinstance(data, list) else []
+
+    def _resolve_custom_fields(self, fields: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        resolved: List[Dict[str, Any]] = []
+        resolved.append({"customField": {"id": self.CF_ID_MAP["Product"]}, "id": self.PRODUCT_VALUE_ID})
+
+        fields_without_product = [f for f in fields if f.get("fieldName") != "Product"]
+        for field in fields_without_product:
+            field_name = field.get("fieldName")
+            field_value = field.get("fieldValue")
+            if not field_name or not field_value:
+                continue
+            cf_id = self.CF_ID_MAP.get(field_name)
+            if cf_id is None:
+                print(f"[MCP] _resolve_custom_fields: unknown field '{field_name}', skipping")
+                continue
+            options = self._fetch_cfv_options(cf_id)
+            value_id = None
+            for opt in options:
+                if opt.get("name") == field_value:
+                    value_id = opt.get("id")
+                    break
+            if value_id is None:
+                print(f"[MCP] _resolve_custom_fields: value '{field_value}' not found for '{field_name}'")
+                continue
+            resolved.append({"customField": {"id": cf_id}, "id": value_id})
+
+        print(f"[MCP] _resolve_custom_fields: {resolved}")
+        return resolved
+
+    def _create_scenario_step_direct(self, text: str, testcase_id: int) -> bool:
+        url = f"{self._base_url}/api/testcase/step"
+        payload = {
+            "bodyJson": self._build_body_json(text),
+            "testCaseId": testcase_id,
+        }
+        resp = requests.post(url, headers=self._api_headers(), json=payload, verify=False)
+        if resp.ok:
+            return True
+        print(f"[MCP] _create_scenario_step_direct: failed for tc={testcase_id}: {resp.status_code} {resp.text[:200]}")
+        return False
+
+    def _create_scenario_direct(self, steps: List[str], testcase_id: int) -> int:
+        created = 0
+        for step in steps or []:
+            if not step:
+                continue
+            if self._create_scenario_step_direct(str(step), testcase_id):
+                created += 1
+        return created
+
     def _run(self, coro):
         try:
             asyncio.get_running_loop()
@@ -600,50 +668,34 @@ class AllureMCPService:
         expected_result: str,
         fields: List[Dict[str, Any]],
     ) -> Any:
-        async with self._client.with_session() as session:
-            tools_result = await session.list_tools()
-            resolver = AllureMCPToolResolver(tools_result.tools)
-            create_tool = resolver.create_test_case_tool()
-            if create_tool is None:
-                raise RuntimeError("Allure MCP server does not expose a create test case tool.")
+        non_empty_fields = [f for f in (fields or []) if f.get("fieldValue")]
+        custom_fields = self._resolve_custom_fields(non_empty_fields) if non_empty_fields else []
 
-            payload: Dict[str, Any] = {
-                "name": name,
-                "precondition": precondition or "",
-                "expectedResult": expected_result or "",
-            }
-            if self._project_id is not None:
-                payload["projectId"] = self._project_id
+        payload: Dict[str, Any] = {
+            "automated": False,
+            "name": name,
+            "precondition": precondition or "",
+            "expectedResult": expected_result or "",
+        }
+        if self._project_id is not None:
+            payload["projectId"] = self._project_id
+        if custom_fields:
+            payload["customFields"] = custom_fields
 
-            if fields:
-                payload["customFields"] = fields
+        url = f"{self._base_url}/api/testcase"
+        print(f"[MCP] create_test_case: POST {url}")
+        print(f"[MCP] create_test_case: payload={json.dumps(payload, ensure_ascii=False)}")
+        resp = requests.post(url, headers=self._api_headers(), json=payload, verify=False)
+        resp.raise_for_status()
+        created = resp.json()
+        print(f"[MCP] create_test_case: created id={created.get('id')}")
 
-            args = {"body": payload} if "body" in (create_tool.inputSchema or {}).get("properties", {}) else payload
-            result = await session.call_tool(create_tool.name, args)
-            if result.isError:
-                raise RuntimeError(f"Allure MCP tool error: {result.content}")
-            created = self._extract_json_from_result(result)
+        test_case_id = created.get("id") if isinstance(created, dict) else None
+        if test_case_id is not None and steps:
+            count = self._create_scenario_direct(steps, test_case_id)
+            print(f"[MCP] create_test_case: {count}/{len(steps)} steps created for tc={test_case_id}")
 
-            test_case_id = created.get("id") if isinstance(created, dict) else None
-            create_step_tool = resolver.create_step_tool()
-            if test_case_id is not None and create_step_tool is not None:
-                for step in steps or []:
-                    if not step:
-                        continue
-                    step_payload = {
-                        "bodyJson": self._build_body_json(str(step)),
-                        "testCaseId": test_case_id,
-                    }
-                    step_args = (
-                        {"body": step_payload}
-                        if "body" in (create_step_tool.inputSchema or {}).get("properties", {})
-                        else step_payload
-                    )
-                    step_result = await session.call_tool(create_step_tool.name, step_args)
-                    if step_result.isError:
-                        break
-
-            return created
+        return created
 
     def create_test_case(
         self,
