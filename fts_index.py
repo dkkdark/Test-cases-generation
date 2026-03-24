@@ -5,8 +5,8 @@ from typing import Iterable, List, Dict, Any
 
 
 class TestCaseFTSIndex:
-    UPDATE_CONFIDENCE_THRESHOLD = 8.5
-    STRONG_NAME_OR_STEPS_THRESHOLD = 0.55
+    UPDATE_CONFIDENCE_THRESHOLD = 6.5
+    STRONG_NAME_OR_STEPS_THRESHOLD = 0.4
     STOP_WORDS = {
         "и", "или", "в", "во", "на", "по", "для", "из", "с", "со", "к", "ко", "у",
         "о", "об", "от", "до", "над", "под", "при", "не", "но", "а", "то", "это",

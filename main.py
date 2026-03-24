@@ -108,8 +108,8 @@ class TestCaseService:
         return {
             "Operation": str(case.get("Operation", case.get("operation", "create"))).lower(),
             "Existing ID": case.get("Existing ID", case.get("existing_id")),
-            "Change summary": case.get("Change summary", case.get("change_summary", "")),
             "Name": case.get("Name", case.get("name", "")),
+            "Description": case.get("Description", case.get("description", "")),
             "Precondition": case.get("Precondition", case.get("precondition", "")),
             "Step": case.get("Step", case.get("steps", [])) if isinstance(case.get("Step", case.get("steps", [])), list) else [],
             "Expected result": case.get("Expected result", case.get("expected_result", "")),
@@ -152,7 +152,55 @@ class TestCaseService:
             merged[name] = {"fieldName": name, "fieldValue": value}
         return list(merged.values())
 
-    def _normalize_llm_result(self, raw_result: str, inferred_fields: list[dict]) -> dict:
+    @staticmethod
+    def _coerce_case_id(raw_id):
+        if raw_id in (None, "", 0, "0"):
+            return None
+        try:
+            return int(raw_id)
+        except (TypeError, ValueError):
+            return str(raw_id)
+
+    @staticmethod
+    def _build_existing_case_index(existing_cases: list[dict]) -> dict:
+        index = {}
+        for case in existing_cases or []:
+            case_id = TestCaseService._coerce_case_id(case.get("id"))
+            if case_id is not None:
+                index[case_id] = case
+        return index
+
+    def _merge_update_case_with_existing(self, item: dict, existing_case: dict) -> dict:
+        if not existing_case:
+            item["Fields"] = self._normalize_fields_value(item.get("Fields", []))
+            return item
+
+        existing_fields = self._normalize_fields_value(existing_case.get("fields", existing_case.get("Fields", [])))
+        merged_fields = {field["fieldName"]: dict(field) for field in existing_fields if field.get("fieldName")}
+        for field in item.get("Fields", []):
+            name = field.get("fieldName")
+            value = field.get("fieldValue")
+            if not name or value in (None, ""):
+                continue
+            merged_fields[name] = {"fieldName": name, "fieldValue": value}
+
+        existing_steps = existing_case.get("steps", existing_case.get("Step", []))
+        item["Name"] = existing_case.get("name", existing_case.get("Name", item.get("Name", "")))
+        if not item.get("Description"):
+            item["Description"] = existing_case.get("description", existing_case.get("Description", ""))
+        if not item.get("Precondition"):
+            item["Precondition"] = existing_case.get("precondition", existing_case.get("Precondition", ""))
+        if not item.get("Step"):
+            item["Step"] = existing_steps if isinstance(existing_steps, list) else []
+        if not item.get("Expected result"):
+            item["Expected result"] = existing_case.get(
+                "expectedResult",
+                existing_case.get("expected_result", existing_case.get("Expected result", "")),
+            )
+        item["Fields"] = list(merged_fields.values())
+        return item
+
+    def _normalize_llm_result(self, raw_result: str, inferred_fields: list[dict], existing_cases: list[dict]) -> dict:
         parsed = self._extract_json_payload(raw_result)
         if isinstance(parsed, list):
             parsed = {
@@ -171,11 +219,17 @@ class TestCaseService:
             grouped[key] = [self._normalize_case_item(item) for item in items]
 
         shared_fields = self._collect_shared_fields(grouped, inferred_fields)
+        existing_case_index = self._build_existing_case_index(existing_cases)
         for key, items in grouped.items():
             for item in items:
-                if key == "possibly_affected_existing":
+                existing_id = self._coerce_case_id(item.get("Existing ID"))
+                if key == "possibly_affected_existing" or existing_id in existing_case_index:
                     item["Operation"] = "update"
-                item["Fields"] = self._merge_case_fields(item.get("Fields", []), shared_fields)
+                if existing_id in existing_case_index:
+                    item["Existing ID"] = existing_id
+                    item = self._merge_update_case_with_existing(item, existing_case_index[existing_id])
+                else:
+                    item["Fields"] = self._merge_case_fields(item.get("Fields", []), shared_fields)
 
         return grouped
 
@@ -223,6 +277,7 @@ class TestCaseService:
             f"{signature}\n"
             f"Fields: {formatted_fields}\n"
             f"Name: {case.get('name', '')}\n"
+            f"Description: {case.get('description', '')}\n"
             f"Precondition: {case.get('precondition', '')}\n"
             f"Steps: {steps_text}\n"
             f"Expected result: {case.get('expectedResult', case.get('expected_result', ''))}\n"
@@ -314,7 +369,7 @@ class TestCaseService:
         search_basis = " ".join(parts).strip()
         return search_basis[:600]
 
-    async def get_test_case(self, query: str, doc_url: str = "", size: int = 10) -> str:
+    async def get_test_case(self, query: str, doc_url: str = "", size: int = 16) -> str:
         try:
             print(f"[MCP] get_test_case: query='{query}' doc_url='{doc_url}' size={size}")
             confluence_context = ""
@@ -325,8 +380,7 @@ class TestCaseService:
                 print(f"[MCP] get_test_case: loaded Confluence context size={len(confluence_context)}")
 
             search_query = self._build_search_query(query, confluence_context)
-            print(f"[MCP] get_test_case: search_query='{search_query[:250]}'")
-            search_limit = max(size, 12)
+            search_limit = max(size, 20)
             search_candidates = self.fts_index.search_detailed(search_query, limit=search_limit)
             ids = [item["id"] for item in search_candidates]
             print(f"[MCP] get_test_case: ranked candidates={search_candidates}")
@@ -354,7 +408,7 @@ class TestCaseService:
                     "ranked_candidates": ranked_context,
                 }
             ).content
-            normalized_result = self._normalize_llm_result(raw_result, inferred_fields)
+            normalized_result = self._normalize_llm_result(raw_result, inferred_fields, cases)
             print("[MCP] get_test_case: LLM response generated")
             return json.dumps(normalized_result, ensure_ascii=False)
         except Exception as e:
@@ -376,10 +430,11 @@ class TestCaseService:
             print(f"[MCP] rebuild_fts_index: error {e!r}")
             return f"Error: {str(e)}"
 
-    async def create_test_case(self, name: str, precondition: str, steps: list[str], expected_result: str, fields: list[dict]) -> str:
+    async def create_test_case(self, name: str, description: str, precondition: str, steps: list[str], expected_result: str, fields: list[dict]) -> str:
         try:
             created = await self.mcp_service.create_test_case_async(
                 name=name,
+                description=description,
                 precondition=precondition,
                 steps=steps,
                 expected_result=expected_result,
@@ -397,11 +452,12 @@ class TestCaseService:
             traceback.print_exc()
             return f"Error: {str(e)}"
 
-    async def update_test_case(self, test_case_id: int, name: str, precondition: str, steps: list[str], expected_result: str, fields: list[dict]) -> str:
+    async def update_test_case(self, test_case_id: int, name: str, description: str, precondition: str, steps: list[str], expected_result: str, fields: list[dict]) -> str:
         try:
             await self.mcp_service.update_test_case_async(
                 test_case_id=test_case_id,
                 name=name,
+                description=description,
                 precondition=precondition,
                 steps=steps,
                 expected_result=expected_result,
@@ -432,9 +488,10 @@ async def rebuild_fts_index(size: int = 200) -> str:
     return await test_case_service.rebuild_fts_index(size=size)
 
 @mcp.tool()
-async def create_test_case(name: str, precondition: str, steps: list[str], expected_result: str, fields: list[dict]) -> str:
+async def create_test_case(name: str, description: str, precondition: str, steps: list[str], expected_result: str, fields: list[dict]) -> str:
     return await test_case_service.create_test_case(
         name=name,
+        description=description,
         precondition=precondition,
         steps=steps,
         expected_result=expected_result,
@@ -442,10 +499,11 @@ async def create_test_case(name: str, precondition: str, steps: list[str], expec
     )
 
 @mcp.tool()
-async def update_test_case(test_case_id: int, name: str, precondition: str, steps: list[str], expected_result: str, fields: list[dict]) -> str:
+async def update_test_case(test_case_id: int, name: str, description: str, precondition: str, steps: list[str], expected_result: str, fields: list[dict]) -> str:
     return await test_case_service.update_test_case(
         test_case_id=test_case_id,
         name=name,
+        description=description,
         precondition=precondition,
         steps=steps,
         expected_result=expected_result,
@@ -490,6 +548,7 @@ async def http_create_test_case(request: Request):
     data = await request.json()
     result = await test_case_service.create_test_case(
         name=data.get("name", ""),
+        description=data.get("description", ""),
         precondition=data.get("precondition", ""),
         steps=data.get("steps", []),
         expected_result=data.get("expected_result", ""),
@@ -503,6 +562,7 @@ async def http_update_test_case(request: Request):
     result = await test_case_service.update_test_case(
         test_case_id=int(data.get("test_case_id", 0)),
         name=data.get("name", ""),
+        description=data.get("description", ""),
         precondition=data.get("precondition", ""),
         steps=data.get("steps", []),
         expected_result=data.get("expected_result", ""),

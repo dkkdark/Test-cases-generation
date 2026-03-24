@@ -184,6 +184,17 @@ class AllureMCPToolResolver:
             lambda t: "create" in (t.description or "").lower() and "test case" in (t.description or "").lower()
         )
 
+    def update_test_case_tool(self) -> Optional[Any]:
+        return self._find_by_name(
+            [
+                "update_test_case",
+                "allure_update_test_case",
+                "allure_update_15",
+            ]
+        ) or self._find_by_predicate(
+            lambda t: "update" in (t.description or "").lower() and "test case" in (t.description or "").lower()
+        )
+
     def get_scenario_tool(self) -> Optional[Any]:
         return self._find_by_predicate(
             lambda t: "scenario" in (t.description or "").lower()
@@ -507,9 +518,128 @@ class AllureMCPService:
         props = schema.get("properties", {}) if isinstance(schema, dict) else {}
         if "testCaseId" in props:
             return {"testCaseId": test_case_id}
+        if "test_case_id" in props:
+            return {"test_case_id": test_case_id}
+        if "allureId" in props:
+            return {"allureId": test_case_id}
         if "id" in props:
             return {"id": test_case_id}
         return {"testCaseId": test_case_id}
+
+    def _build_update_tool_args(
+        self,
+        tool: Any,
+        test_case_id: int,
+        name: str,
+        description: str,
+        precondition: str,
+        expected_result: str,
+        custom_fields: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        schema = getattr(tool, "inputSchema", {}) or {}
+        props = schema.get("properties", {}) if isinstance(schema, dict) else {}
+        payload_schema = props.get("payload", {}) if isinstance(props.get("payload", {}), dict) else {}
+        payload_props = payload_schema.get("properties", {}) if isinstance(payload_schema, dict) else {}
+        args = self._tool_args_with_id(tool, test_case_id)
+        payload: Dict[str, Any] = {}
+
+        if "name" in props:
+            args["name"] = name
+        if "name" in payload_props:
+            payload["name"] = name
+        if "description" in props:
+            args["description"] = description or ""
+        if "description" in payload_props:
+            payload["description"] = description or ""
+        if "precondition" in props:
+            args["precondition"] = precondition or ""
+        if "precondition" in payload_props:
+            payload["precondition"] = precondition or ""
+        if "expectedResult" in props:
+            args["expectedResult"] = expected_result or ""
+        if "expectedResult" in payload_props:
+            payload["expectedResult"] = expected_result or ""
+        if "expected_result" in props:
+            args["expected_result"] = expected_result or ""
+        if "expected_result" in payload_props:
+            payload["expected_result"] = expected_result or ""
+        if "automated" in props:
+            args["automated"] = False
+        if "automated" in payload_props:
+            payload["automated"] = False
+        if self._project_id is not None and "projectId" in props:
+            args["projectId"] = self._project_id
+        if self._project_id is not None and "projectId" in payload_props:
+            payload["projectId"] = self._project_id
+        if self._project_id is not None and "project_id" in props:
+            args["project_id"] = self._project_id
+        if self._project_id is not None and "project_id" in payload_props:
+            payload["project_id"] = self._project_id
+        if custom_fields and "customFields" in props:
+            args["customFields"] = custom_fields
+        if custom_fields and "customFields" in payload_props:
+            payload["customFields"] = custom_fields
+        if custom_fields and "custom_fields" in props:
+            args["custom_fields"] = custom_fields
+        if custom_fields and "custom_fields" in payload_props:
+            payload["custom_fields"] = custom_fields
+
+        if "payload" in props:
+            if not payload:
+                payload = {
+                    "name": name,
+                    "description": description or "",
+                    "precondition": precondition or "",
+                    "expectedResult": expected_result or "",
+                    "automated": False,
+                }
+                if self._project_id is not None:
+                    payload["projectId"] = self._project_id
+                if custom_fields:
+                    payload["customFields"] = custom_fields
+
+                normalized_payload = {}
+                for key, value in payload.items():
+                    if key in payload_props or not payload_props:
+                        normalized_payload[key] = value
+                payload = normalized_payload
+            args["payload"] = payload
+        return args
+
+    async def _update_test_case_via_mcp_async(
+        self,
+        test_case_id: int,
+        name: str,
+        description: str,
+        precondition: str,
+        expected_result: str,
+        custom_fields: List[Dict[str, Any]],
+    ) -> Optional[Any]:
+        async with self._client.with_session() as session:
+            tools_result = await session.list_tools()
+            resolver = AllureMCPToolResolver(tools_result.tools)
+            update_tool = resolver.update_test_case_tool()
+            if update_tool is None:
+                print("[MCP] update_test_case: MCP update tool not found, using direct REST fallback")
+                return None
+
+            args = self._build_update_tool_args(
+                tool=update_tool,
+                test_case_id=test_case_id,
+                name=name,
+                description=description,
+                precondition=precondition,
+                expected_result=expected_result,
+                custom_fields=custom_fields,
+            )
+            print(f"[MCP] update_test_case: MCP tool={update_tool.name} args={json.dumps(args, ensure_ascii=False)}")
+            result = await session.call_tool(update_tool.name, args)
+            if getattr(result, "isError", False):
+                print(f"[MCP] update_test_case: MCP tool error content={getattr(result, 'content', None)}")
+                return None
+            parsed = self._extract_json_from_result(result)
+            print(f"[MCP] update_test_case: MCP tool succeeded with type={type(parsed).__name__}")
+            return parsed if parsed is not None else getattr(result, "content", None)
 
     @staticmethod
     def _build_body_json(text: str) -> Dict[str, Any]:
@@ -763,6 +893,7 @@ class AllureMCPService:
     async def _create_test_case_async(
         self,
         name: str,
+        description: str,
         precondition: str,
         steps: List[str],
         expected_result: str,
@@ -774,6 +905,7 @@ class AllureMCPService:
         payload: Dict[str, Any] = {
             "automated": False,
             "name": name,
+            "description": description or "",
             "precondition": precondition or "",
             "expectedResult": expected_result or "",
         }
@@ -801,6 +933,7 @@ class AllureMCPService:
         self,
         test_case_id: int,
         name: str,
+        description: str,
         precondition: str,
         steps: List[str],
         expected_result: str,
@@ -809,24 +942,76 @@ class AllureMCPService:
         non_empty_fields = [f for f in (fields or []) if f.get("fieldValue")]
         custom_fields = self._resolve_custom_fields(non_empty_fields) if non_empty_fields else []
 
-        payload: Dict[str, Any] = {
+        try:
+            updated_case = await self._update_test_case_via_mcp_async(
+                test_case_id=test_case_id,
+                name=name,
+                description=description,
+                precondition=precondition,
+                expected_result=expected_result,
+                custom_fields=custom_fields,
+            )
+            if updated_case is not None:
+                scenario_result = self._replace_scenario_direct(steps, test_case_id)
+                print(
+                    "[MCP] update_test_case: scenario updated "
+                    f"updated={scenario_result['updated']} created={scenario_result['created']} deleted={scenario_result['deleted']}"
+                )
+                return updated_case
+        except Exception as exc:
+            print(f"[MCP] update_test_case: MCP update path failed, fallback to REST: {exc!r}")
+
+        base_payload: Dict[str, Any] = {
             "id": test_case_id,
             "automated": False,
             "name": name,
+            "description": description or "",
             "precondition": precondition or "",
             "expectedResult": expected_result or "",
         }
         if self._project_id is not None:
-            payload["projectId"] = self._project_id
+            base_payload["projectId"] = self._project_id
         if custom_fields:
-            payload["customFields"] = custom_fields
+            base_payload["customFields"] = custom_fields
 
         url = f"{self._base_url}/api/testcase/{test_case_id}"
-        print(f"[MCP] update_test_case: PUT {url}")
-        print(f"[MCP] update_test_case: payload={json.dumps(payload, ensure_ascii=False)}")
-        resp = requests.put(url, headers=self._api_headers(), json=payload, verify=False)
-        resp.raise_for_status()
-        updated_case = resp.json()
+        payload_variants: List[Dict[str, Any]] = []
+
+        def add_variant(payload: Dict[str, Any]) -> None:
+            key = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+            if any(json.dumps(item, ensure_ascii=False, sort_keys=True) == key for item in payload_variants):
+                return
+            payload_variants.append(payload)
+
+        add_variant(dict(base_payload))
+        add_variant({k: v for k, v in base_payload.items() if k != "projectId"})
+        add_variant({k: v for k, v in base_payload.items() if k != "id"})
+        add_variant({k: v for k, v in base_payload.items() if k not in {"id", "projectId"}})
+        if custom_fields:
+            add_variant({k: v for k, v in base_payload.items() if k != "customFields"})
+            add_variant({k: v for k, v in base_payload.items() if k not in {"projectId", "customFields"}})
+            add_variant({k: v for k, v in base_payload.items() if k not in {"id", "customFields"}})
+            add_variant({k: v for k, v in base_payload.items() if k not in {"id", "projectId", "customFields"}})
+
+        updated_case = None
+        last_error_message = ""
+        for index, payload in enumerate(payload_variants, start=1):
+            print(f"[MCP] update_test_case: PUT {url} variant={index}/{len(payload_variants)}")
+            print(f"[MCP] update_test_case: payload={json.dumps(payload, ensure_ascii=False)}")
+            resp = requests.put(url, headers=self._api_headers(), json=payload, verify=False)
+            if resp.ok:
+                updated_case = resp.json() if resp.content else {}
+                print(f"[MCP] update_test_case: variant={index} succeeded")
+                break
+
+            body_preview = (resp.text or "")[:1000]
+            last_error_message = f"status={resp.status_code} body={body_preview}"
+            print(f"[MCP] update_test_case: variant={index} failed {last_error_message}")
+
+        if updated_case is None:
+            raise RuntimeError(
+                f"Allure update failed for test case {test_case_id}: {last_error_message}"
+            )
 
         scenario_result = self._replace_scenario_direct(steps, test_case_id)
         print(
@@ -839,6 +1024,7 @@ class AllureMCPService:
     def create_test_case(
         self,
         name: str,
+        description: str,
         precondition: str,
         steps: List[str],
         expected_result: str,
@@ -847,6 +1033,7 @@ class AllureMCPService:
         return self._run(
             self._create_test_case_async(
                 name=name,
+                description=description,
                 precondition=precondition,
                 steps=steps,
                 expected_result=expected_result,
@@ -857,6 +1044,7 @@ class AllureMCPService:
     async def create_test_case_async(
         self,
         name: str,
+        description: str,
         precondition: str,
         steps: List[str],
         expected_result: str,
@@ -864,6 +1052,7 @@ class AllureMCPService:
     ) -> Any:
         return await self._create_test_case_async(
             name=name,
+            description=description,
             precondition=precondition,
             steps=steps,
             expected_result=expected_result,
@@ -874,6 +1063,7 @@ class AllureMCPService:
         self,
         test_case_id: int,
         name: str,
+        description: str,
         precondition: str,
         steps: List[str],
         expected_result: str,
@@ -883,6 +1073,7 @@ class AllureMCPService:
             self._update_test_case_async(
                 test_case_id=test_case_id,
                 name=name,
+                description=description,
                 precondition=precondition,
                 steps=steps,
                 expected_result=expected_result,
@@ -894,6 +1085,7 @@ class AllureMCPService:
         self,
         test_case_id: int,
         name: str,
+        description: str,
         precondition: str,
         steps: List[str],
         expected_result: str,
@@ -902,6 +1094,7 @@ class AllureMCPService:
         return await self._update_test_case_async(
             test_case_id=test_case_id,
             name=name,
+            description=description,
             precondition=precondition,
             steps=steps,
             expected_result=expected_result,

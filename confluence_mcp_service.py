@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from html import unescape
 from typing import Any, Dict, Iterable, List, Optional
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 from mcp.client.session import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
@@ -269,6 +269,103 @@ class ConfluenceMCPService:
         return None
 
     @staticmethod
+    def _extract_text_fragment(doc_url: str) -> Optional[str]:
+        fragment = urlparse(doc_url).fragment or ""
+        marker = ":~:text="
+        if marker not in fragment:
+            return None
+        encoded = fragment.split(marker, 1)[1]
+        if not encoded:
+            return None
+        first_part = encoded.split("&", 1)[0]
+        first_part = first_part.split(",", 1)[0]
+        decoded = unquote(first_part).strip()
+        return decoded or None
+
+    @staticmethod
+    def _normalize_for_match(text: str) -> str:
+        return " ".join((text or "").lower().split())
+
+    def _extract_relevant_fragment(self, full_text: str, doc_url: str, radius: int = 900) -> str:
+        marker = self._extract_text_fragment(doc_url)
+        if not marker:
+            return full_text
+
+        normalized_marker = self._normalize_for_match(marker)
+        if not normalized_marker:
+            return full_text
+
+        normalized_full = self._normalize_for_match(full_text)
+        marker_index = normalized_full.find(normalized_marker)
+        paragraphs = [chunk.strip() for chunk in re.split(r"\n\s*\n", full_text) if chunk.strip()]
+
+        if marker_index == -1:
+            marker_words = [word for word in re.findall(r"\w+", normalized_marker) if len(word) > 2]
+            if not marker_words:
+                return marker
+            best_block = None
+            best_score = 0
+            best_index = -1
+            for index, block in enumerate(paragraphs):
+                normalized_block = self._normalize_for_match(block)
+                score = sum(1 for word in marker_words if word in normalized_block)
+                if score > best_score:
+                    best_score = score
+                    best_block = block
+                    best_index = index
+            if best_block and best_score > 0:
+                selected = [best_block]
+                if best_index + 1 < len(paragraphs):
+                    selected.append(paragraphs[best_index + 1])
+                excerpt = "\n\n".join(selected).strip()
+                print(
+                    "[Confluence MCP] fragment match by paragraph:"
+                    f" marker={marker!r}"
+                    f" score={best_score}"
+                    f" excerpt_len={len(excerpt)}"
+                )
+                return excerpt
+            print(
+                "[Confluence MCP] fragment fallback to marker text only:"
+                f" marker={marker!r}"
+            )
+            return marker
+
+        words = full_text.split()
+        if not words:
+            return marker
+
+        marker_words = normalized_marker.split()
+        start_idx = None
+        end_idx = None
+        char_count = 0
+        for idx, word in enumerate(words):
+            next_count = char_count + len(word) + (1 if idx > 0 else 0)
+            if start_idx is None and next_count >= marker_index:
+                start_idx = idx
+            if start_idx is not None and end_idx is None and next_count >= marker_index + len(" ".join(marker_words)):
+                end_idx = idx
+                break
+            char_count = next_count
+
+        if start_idx is None:
+            return marker
+        if end_idx is None:
+            end_idx = min(len(words) - 1, start_idx + len(marker_words))
+
+        excerpt_start = max(0, start_idx - 70)
+        excerpt_end = min(len(words), end_idx + 120)
+        excerpt = " ".join(words[excerpt_start:excerpt_end]).strip()
+        if excerpt:
+            print(
+                "[Confluence MCP] fragment direct match:"
+                f" marker={marker!r}"
+                f" excerpt_len={len(excerpt)}"
+            )
+            return excerpt
+        return marker
+
+    @staticmethod
     def _strip_html(raw_html: str) -> str:
         text = re.sub(r"<(script|style)[^>]*>.*?</\1>", " ", raw_html, flags=re.IGNORECASE | re.DOTALL)
         text = re.sub(r"<br\s*/?>", "\n", text, flags=re.IGNORECASE)
@@ -441,6 +538,7 @@ class ConfluenceMCPService:
                     result = await session.call_tool(tool.name, args)
                     text = self._extract_text(result)
                     if text.strip():
+                        text = self._extract_relevant_fragment(text, doc_url)
                         print(
                             "[Confluence MCP] page fetch success:"
                             f" tool={tool.name}"
