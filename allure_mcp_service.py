@@ -217,6 +217,7 @@ class AllureMCPService:
         self._base_url = os.getenv("ALLURE_TESTOPS_URL") or os.getenv("BASE_URL", "")
         self._user_token = os.getenv("ALLURE_TOKEN") or os.getenv("USER_TOKEN", "")
         self._jwt_token: Optional[str] = None
+        self._cfv_options_cache: Dict[int, List[Dict[str, Any]]] = {}
 
     def _read_project_id(self) -> Optional[int]:
         for key in ("ALLURE_PROJECT_ID", "PROJECT_ID"):
@@ -338,12 +339,50 @@ class AllureMCPService:
     PRODUCT_VALUE_ID = 10152
 
     def _fetch_cfv_options(self, custom_field_id: int) -> List[Dict[str, Any]]:
+        if custom_field_id in self._cfv_options_cache:
+            return self._cfv_options_cache[custom_field_id]
         project_id = self._project_id or 2
         url = f"{self._base_url}/api/project/{project_id}/cfv?customFieldId={custom_field_id}&size=350"
         resp = requests.get(url, headers=self._api_headers(), verify=False)
         resp.raise_for_status()
         data = resp.json()
-        return data.get("content", []) if isinstance(data, dict) else data if isinstance(data, list) else []
+        options = data.get("content", []) if isinstance(data, dict) else data if isinstance(data, list) else []
+        self._cfv_options_cache[custom_field_id] = options
+        return options
+
+    def _create_cfv_option(self, custom_field_id: int, field_value: str) -> Optional[int]:
+        project_id = self._project_id or 2
+        endpoints_and_payloads = [
+            (
+                f"{self._base_url}/api/project/{project_id}/cfv",
+                {"name": field_value, "customFieldId": custom_field_id},
+            ),
+            (
+                f"{self._base_url}/api/project/{project_id}/cfv",
+                {"name": field_value, "customField": {"id": custom_field_id}},
+            ),
+            (
+                f"{self._base_url}/api/cfv",
+                {"name": field_value, "projectId": project_id, "customField": {"id": custom_field_id}},
+            ),
+        ]
+
+        for url, payload in endpoints_and_payloads:
+            try:
+                resp = requests.post(url, headers=self._api_headers(), json=payload, verify=False)
+                if not resp.ok:
+                    print(f"[MCP] _create_cfv_option: failed url={url} status={resp.status_code} body={resp.text[:200]}")
+                    continue
+                data = resp.json() if resp.content else {}
+                created_id = data.get("id") if isinstance(data, dict) else None
+                if created_id is not None:
+                    self._cfv_options_cache.pop(custom_field_id, None)
+                    print(f"[MCP] _create_cfv_option: created '{field_value}' for cf={custom_field_id} id={created_id}")
+                    return int(created_id)
+            except Exception as exc:
+                print(f"[MCP] _create_cfv_option: exception for url={url}: {exc}")
+
+        return None
 
     def _resolve_custom_fields(self, fields: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         resolved: List[Dict[str, Any]] = []
@@ -366,8 +405,11 @@ class AllureMCPService:
                     value_id = opt.get("id")
                     break
             if value_id is None:
-                print(f"[MCP] _resolve_custom_fields: value '{field_value}' not found for '{field_name}'")
-                continue
+                print(f"[MCP] _resolve_custom_fields: value '{field_value}' not found for '{field_name}', trying to create")
+                value_id = self._create_cfv_option(cf_id, str(field_value))
+                if value_id is None:
+                    print(f"[MCP] _resolve_custom_fields: failed to create value '{field_value}' for '{field_name}'")
+                    continue
             resolved.append({"customField": {"id": cf_id}, "id": value_id})
 
         print(f"[MCP] _resolve_custom_fields: {resolved}")
@@ -393,6 +435,64 @@ class AllureMCPService:
             if self._create_scenario_step_direct(str(step), testcase_id):
                 created += 1
         return created
+
+    def _get_scenario_steps_with_ids_direct(self, testcase_id: int) -> List[Dict[str, Any]]:
+        url = f"{self._base_url}/api/testcase/{testcase_id}/step"
+        resp = requests.get(url, headers=self._api_headers(), verify=False)
+        resp.raise_for_status()
+        data = resp.json() or {}
+        scenario_steps = data.get("scenarioSteps", {})
+        if isinstance(scenario_steps, dict):
+            return [
+                {"id": step_id, "body": step.get("body", "")}
+                for step_id, step in scenario_steps.items()
+                if isinstance(step, dict)
+            ]
+        return []
+
+    def _update_scenario_step_direct(self, step_id: int, text: str, testcase_id: int) -> bool:
+        url = f"{self._base_url}/api/testcase/step/{step_id}"
+        payload = {
+            "bodyJson": self._build_body_json(text),
+            "testCaseId": testcase_id,
+        }
+        resp = requests.put(url, headers=self._api_headers(), json=payload, verify=False)
+        if resp.ok:
+            return True
+        print(f"[MCP] _update_scenario_step_direct: failed for step={step_id}: {resp.status_code} {resp.text[:200]}")
+        return False
+
+    def _delete_scenario_step_direct(self, step_id: int) -> bool:
+        url = f"{self._base_url}/api/testcase/step/{step_id}"
+        resp = requests.delete(url, headers=self._api_headers(), verify=False)
+        if resp.ok:
+            return True
+        print(f"[MCP] _delete_scenario_step_direct: failed for step={step_id}: {resp.status_code} {resp.text[:200]}")
+        return False
+
+    def _replace_scenario_direct(self, steps: List[str], testcase_id: int) -> Dict[str, int]:
+        existing_steps = self._get_scenario_steps_with_ids_direct(testcase_id)
+        updated = 0
+        created = 0
+        deleted = 0
+
+        for index, text in enumerate(steps or []):
+            if not text:
+                continue
+            if index < len(existing_steps):
+                step_id = existing_steps[index].get("id")
+                if step_id is not None and self._update_scenario_step_direct(int(step_id), str(text), testcase_id):
+                    updated += 1
+            else:
+                if self._create_scenario_step_direct(str(text), testcase_id):
+                    created += 1
+
+        for extra_step in existing_steps[len(steps or []):]:
+            step_id = extra_step.get("id")
+            if step_id is not None and self._delete_scenario_step_direct(int(step_id)):
+                deleted += 1
+
+        return {"updated": updated, "created": created, "deleted": deleted}
 
     def _run(self, coro):
         try:
@@ -697,6 +797,45 @@ class AllureMCPService:
 
         return created
 
+    async def _update_test_case_async(
+        self,
+        test_case_id: int,
+        name: str,
+        precondition: str,
+        steps: List[str],
+        expected_result: str,
+        fields: List[Dict[str, Any]],
+    ) -> Any:
+        non_empty_fields = [f for f in (fields or []) if f.get("fieldValue")]
+        custom_fields = self._resolve_custom_fields(non_empty_fields) if non_empty_fields else []
+
+        payload: Dict[str, Any] = {
+            "id": test_case_id,
+            "automated": False,
+            "name": name,
+            "precondition": precondition or "",
+            "expectedResult": expected_result or "",
+        }
+        if self._project_id is not None:
+            payload["projectId"] = self._project_id
+        if custom_fields:
+            payload["customFields"] = custom_fields
+
+        url = f"{self._base_url}/api/testcase/{test_case_id}"
+        print(f"[MCP] update_test_case: PUT {url}")
+        print(f"[MCP] update_test_case: payload={json.dumps(payload, ensure_ascii=False)}")
+        resp = requests.put(url, headers=self._api_headers(), json=payload, verify=False)
+        resp.raise_for_status()
+        updated_case = resp.json()
+
+        scenario_result = self._replace_scenario_direct(steps, test_case_id)
+        print(
+            "[MCP] update_test_case: scenario updated "
+            f"updated={scenario_result['updated']} created={scenario_result['created']} deleted={scenario_result['deleted']}"
+        )
+
+        return updated_case
+
     def create_test_case(
         self,
         name: str,
@@ -724,6 +863,44 @@ class AllureMCPService:
         fields: List[Dict[str, Any]],
     ) -> Any:
         return await self._create_test_case_async(
+            name=name,
+            precondition=precondition,
+            steps=steps,
+            expected_result=expected_result,
+            fields=fields,
+        )
+
+    def update_test_case(
+        self,
+        test_case_id: int,
+        name: str,
+        precondition: str,
+        steps: List[str],
+        expected_result: str,
+        fields: List[Dict[str, Any]],
+    ) -> Any:
+        return self._run(
+            self._update_test_case_async(
+                test_case_id=test_case_id,
+                name=name,
+                precondition=precondition,
+                steps=steps,
+                expected_result=expected_result,
+                fields=fields,
+            )
+        )
+
+    async def update_test_case_async(
+        self,
+        test_case_id: int,
+        name: str,
+        precondition: str,
+        steps: List[str],
+        expected_result: str,
+        fields: List[Dict[str, Any]],
+    ) -> Any:
+        return await self._update_test_case_async(
+            test_case_id=test_case_id,
             name=name,
             precondition=precondition,
             steps=steps,
