@@ -153,6 +153,19 @@ class ConfluenceMCPToolResolver:
             lambda tool: self._looks_like_page_fetch_tool(tool)
         )
 
+    def issue_fetch_tool(self) -> Optional[Any]:
+        return self._find_by_name(
+            [
+                "jira_get_issue",
+                "get_issue",
+                "get_jira_issue",
+                "jira_fetch_issue",
+                "read_issue",
+            ]
+        ) or self._find_by_predicate(
+            lambda tool: self._looks_like_issue_fetch_tool(tool)
+        )
+
     @staticmethod
     def _looks_like_page_fetch_tool(tool: Any) -> bool:
         description = (getattr(tool, "description", "") or "").lower()
@@ -165,6 +178,18 @@ class ConfluenceMCPToolResolver:
         mentions_page = "confluence" in description or "page" in description or "wiki" in description
         mentions_content = "content" in description or "document" in description or "read" in description
         return has_page_locator and (mentions_page or mentions_content)
+
+    @staticmethod
+    def _looks_like_issue_fetch_tool(tool: Any) -> bool:
+        description = (getattr(tool, "description", "") or "").lower()
+        schema = getattr(tool, "inputSchema", {}) or {}
+        props = schema.get("properties", {}) if isinstance(schema, dict) else {}
+        prop_names = {str(name).lower() for name in props.keys()}
+        has_issue_locator = bool(
+            {"issuekey", "issue_key", "key", "id", "issueid", "issue_id", "url", "link"} & prop_names
+        )
+        mentions_issue = "issue" in description or "jira" in description or "ticket" in description
+        return has_issue_locator and mentions_issue
 
 
 class ConfluenceMCPService:
@@ -473,6 +498,14 @@ class ConfluenceMCPService:
         return str(payload)
 
     @staticmethod
+    def _extract_issue_key(issue_ref: str) -> Optional[str]:
+        text = (issue_ref or "").strip()
+        if not text:
+            return None
+        match = re.search(r"\b([A-Z][A-Z0-9]+-\d+)\b", text)
+        return match.group(1) if match else None
+
+    @staticmethod
     def _tool_args_variants(tool: Any, doc_url: str, page_id: Optional[str]) -> List[Dict[str, Any]]:
         schema = getattr(tool, "inputSchema", {}) or {}
         props = schema.get("properties", {}) if isinstance(schema, dict) else {}
@@ -507,6 +540,41 @@ class ConfluenceMCPService:
                         "include_metadata": True,
                     }
                 )
+
+        deduped: List[Dict[str, Any]] = []
+        seen = set()
+        for variant in variants:
+            key = tuple(sorted(variant.items()))
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(variant)
+        return deduped
+
+    @staticmethod
+    def _issue_tool_args_variants(tool: Any, issue_ref: str, issue_key: Optional[str]) -> List[Dict[str, Any]]:
+        schema = getattr(tool, "inputSchema", {}) or {}
+        props = schema.get("properties", {}) if isinstance(schema, dict) else {}
+
+        variants: List[Dict[str, Any]] = []
+        for key in ("url", "link"):
+            if key in props and issue_ref.startswith("http"):
+                variants.append({key: issue_ref})
+
+        if issue_key:
+            for key in ("issueKey", "issue_key", "key"):
+                if key in props:
+                    variants.append({key: issue_key})
+
+        for key in ("issueId", "issue_id", "id"):
+            if key in props and issue_ref.isdigit():
+                variants.append({key: int(issue_ref)})
+
+        if not variants:
+            if issue_ref.startswith("http"):
+                variants.append({"url": issue_ref})
+            if issue_key:
+                variants.append({"issueKey": issue_key})
 
         deduped: List[Dict[str, Any]] = []
         seen = set()
@@ -563,6 +631,49 @@ class ConfluenceMCPService:
             )
         raise RuntimeError(
             "Failed to fetch Confluence page via MCP. "
+            f"Attempted args: {attempted_args}. "
+            f"Result was empty or unsupported."
+        )
+
+    async def fetch_issue_content(self, issue_ref: str) -> str:
+        if not issue_ref or not issue_ref.strip():
+            return ""
+
+        issue_ref = issue_ref.strip()
+        issue_key = self._extract_issue_key(issue_ref)
+        attempted_args: List[Dict[str, Any]] = []
+        async with self._client.session() as session:
+            tools_result = await session.list_tools()
+            resolver = ConfluenceMCPToolResolver(tools_result.tools)
+            tool = resolver.issue_fetch_tool()
+            if tool is None:
+                raise RuntimeError("Atlassian MCP server does not expose a Jira issue fetch tool.")
+
+            last_error = None
+            for args in self._issue_tool_args_variants(tool, issue_ref, issue_key):
+                attempted_args.append(args)
+                try:
+                    result = await session.call_tool(tool.name, args)
+                    text = self._extract_text(result)
+                    if text.strip():
+                        print(
+                            "[Atlassian MCP] issue fetch success:"
+                            f" tool={tool.name}"
+                            f" args={args}"
+                            f" extracted_len={len(text.strip())}"
+                            f" preview={text.strip()[:250]!r}"
+                        )
+                        return text
+                except Exception as exc:
+                    last_error = exc
+                    continue
+
+        if last_error:
+            raise RuntimeError(
+                f"Failed to fetch Jira issue via MCP: {last_error}. Attempted args: {attempted_args}"
+            )
+        raise RuntimeError(
+            "Failed to fetch Jira issue via MCP. "
             f"Attempted args: {attempted_args}. "
             f"Result was empty or unsupported."
         )

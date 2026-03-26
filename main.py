@@ -11,6 +11,7 @@ from langchain_anthropic import ChatAnthropic
 from langchain_core.prompts import ChatPromptTemplate
 from mcp.server.fastmcp import FastMCP
 from allure_mcp_service import AllureMCPService
+from bitbucket_mcp_service import BitbucketMCPService
 from confluence_mcp_service import ConfluenceMCPService
 from prompts import get_test_case_prompt
 from config import Config
@@ -25,6 +26,7 @@ class TestCaseService:
 
     def __init__(self):
         self.mcp_service = AllureMCPService()
+        self.bitbucket_service = BitbucketMCPService()
         self.confluence_service = ConfluenceMCPService()
         provider = os.getenv("LLM_PROVIDER", "anthropic").lower()
         if provider == "ollama":
@@ -45,6 +47,23 @@ class TestCaseService:
         self.prompt = ChatPromptTemplate.from_template(get_test_case_prompt())
         self.chain = self.prompt | self.model
         self.fts_index = TestCaseFTSIndex()
+
+    @staticmethod
+    def _resolve_bitbucket_repo_url(explicit_value: str = "") -> str:
+        return (
+            (explicit_value or "").strip()
+            or os.getenv("BITBUCKET_REPO_URL", "").strip()
+            or os.getenv("DEFAULT_BITBUCKET_REPO_URL", "").strip()
+        )
+
+    @staticmethod
+    def _resolve_bitbucket_branch(explicit_value: str = "") -> str:
+        return (
+            (explicit_value or "").strip()
+            or os.getenv("BITBUCKET_BRANCH", "").strip()
+            or os.getenv("DEFAULT_BITBUCKET_BRANCH", "").strip()
+            or "main"
+        )
 
     @staticmethod
     def _extract_json_payload(raw_result: str):
@@ -344,15 +363,21 @@ class TestCaseService:
         return ""
 
     @staticmethod
-    def _build_search_query(query: str, confluence_context: str) -> str:
+    def _build_search_query(query: str, jira_context: str, confluence_context: str, repo_context: str = "") -> str:
+        parts = []
         base_query = (query or "").strip()
         if base_query:
-            return base_query
+            parts.append(base_query)
 
-        if not confluence_context:
-            return ""
+        jira_title = TestCaseService._extract_title_from_context(jira_context)
+        if jira_title:
+            parts.append(jira_title)
 
-        title = TestCaseService._extract_title_from_context(confluence_context)
+        if confluence_context:
+            title = TestCaseService._extract_title_from_context(confluence_context)
+            if title:
+                parts.append(title)
+
         paragraphs = []
         for chunk in re.split(r"\n\s*\n", confluence_context):
             normalized = " ".join(chunk.split())
@@ -362,24 +387,60 @@ class TestCaseService:
             if len(paragraphs) >= 3:
                 break
 
-        parts = []
-        if title:
-            parts.append(title)
         parts.extend(paragraphs)
+        if repo_context:
+            repo_excerpt = " ".join(repo_context.split())[:300]
+            if repo_excerpt:
+                parts.append(repo_excerpt)
         search_basis = " ".join(parts).strip()
         return search_basis[:600]
 
-    async def get_test_case(self, query: str, doc_url: str = "", size: int = 16) -> str:
+    async def get_test_case(
+        self,
+        query: str,
+        doc_url: str = "",
+        jira_url: str = "",
+        jira_text: str = "",
+        bitbucket_repo_url: str = "",
+        bitbucket_branch: str = "",
+        size: int = 16,
+    ) -> str:
         try:
-            print(f"[MCP] get_test_case: query='{query}' doc_url='{doc_url}' size={size}")
+            resolved_bitbucket_repo_url = self._resolve_bitbucket_repo_url(bitbucket_repo_url)
+            resolved_bitbucket_branch = self._resolve_bitbucket_branch(bitbucket_branch)
+            print(
+                f"[MCP] get_test_case: query='{query}' doc_url='{doc_url}' "
+                f"jira_url='{jira_url}' bitbucket_repo_url='{resolved_bitbucket_repo_url}' "
+                f"bitbucket_branch='{resolved_bitbucket_branch}' size={size}"
+            )
             confluence_context = ""
+            jira_context = (jira_text or "").strip()
             if doc_url and doc_url.strip():
                 confluence_context = self._truncate_context(
                     await self.confluence_service.fetch_page_content(doc_url.strip())
                 )
                 print(f"[MCP] get_test_case: loaded Confluence context size={len(confluence_context)}")
+            if jira_url and jira_url.strip():
+                fetched_jira_context = self._truncate_context(
+                    await self.confluence_service.fetch_issue_content(jira_url.strip())
+                )
+                if fetched_jira_context:
+                    jira_context = fetched_jira_context
+                print(f"[MCP] get_test_case: loaded Jira context size={len(jira_context)}")
 
-            search_query = self._build_search_query(query, confluence_context)
+            repo_search_text = "\n".join(part for part in [query, jira_context, confluence_context] if part and part.strip())
+            repo_context = self._truncate_context(
+                await self.bitbucket_service.collect_context(
+                    repo_url=resolved_bitbucket_repo_url,
+                    branch=resolved_bitbucket_branch,
+                    search_text=repo_search_text,
+                ),
+                limit=10000,
+            )
+            if repo_context:
+                print(f"[MCP] get_test_case: loaded repo context size={len(repo_context)}")
+
+            search_query = self._build_search_query(query, jira_context, confluence_context, repo_context)
             search_limit = max(size, 20)
             search_candidates = self.fts_index.search_detailed(search_query, limit=search_limit)
             ids = [item["id"] for item in search_candidates]
@@ -393,6 +454,11 @@ class TestCaseService:
             context = [self._format_case_for_prompt(case) for case in cases]
             ranked_context = self._format_search_candidates_for_prompt(search_candidates)
             effective_query = query.strip() if query and query.strip() else ""
+            if not effective_query and jira_context:
+                effective_query = (
+                    "Сгенерируй тест-кейсы по Jira-задаче. "
+                    "Определи ключевые сценарии, которые нужно создать или обновить."
+                )
             if not effective_query and confluence_context:
                 effective_query = (
                     "Сгенерируй тест-кейсы по содержимому страницы Confluence. "
@@ -401,8 +467,13 @@ class TestCaseService:
             raw_result = self.chain.invoke(
                 {
                     "query": effective_query,
+                    "jira_url": jira_url.strip(),
+                    "jira_context": jira_context,
                     "doc_url": doc_url.strip(),
                     "confluence_context": confluence_context,
+                    "bitbucket_repo_url": resolved_bitbucket_repo_url,
+                    "bitbucket_branch": resolved_bitbucket_branch,
+                    "repo_context": repo_context,
                     "data": context,
                     "fields": inferred_fields,
                     "ranked_candidates": ranked_context,
@@ -480,8 +551,22 @@ test_case_service = TestCaseService()
 
 
 @mcp.tool()
-async def get_test_case(query: str, doc_url: str = "") -> str:
-    return await test_case_service.get_test_case(query, doc_url=doc_url)
+async def get_test_case(
+    query: str,
+    doc_url: str = "",
+    jira_url: str = "",
+    jira_text: str = "",
+    bitbucket_repo_url: str = "",
+    bitbucket_branch: str = "",
+) -> str:
+    return await test_case_service.get_test_case(
+        query,
+        doc_url=doc_url,
+        jira_url=jira_url,
+        jira_text=jira_text,
+        bitbucket_repo_url=bitbucket_repo_url,
+        bitbucket_branch=bitbucket_branch,
+    )
 
 @mcp.tool()
 async def rebuild_fts_index(size: int = 200) -> str:
@@ -532,8 +617,23 @@ async def http_get_test_case(request: Request):
     data = await request.json()
     query_text = data.get("query", "")
     doc_url = data.get("doc_url", "")
-    print(f"[HTTP] /get_test_case query='{query_text}' doc_url='{doc_url}'")
-    result = await test_case_service.get_test_case(query_text, doc_url=doc_url)
+    jira_url = data.get("jira_url", "")
+    jira_text = data.get("jira_text", "")
+    bitbucket_repo_url = data.get("bitbucket_repo_url", "")
+    bitbucket_branch = data.get("bitbucket_branch", "")
+    print(
+        f"[HTTP] /get_test_case query='{query_text}' doc_url='{doc_url}' "
+        f"jira_url='{jira_url}' bitbucket_repo_url='{bitbucket_repo_url}' "
+        f"bitbucket_branch='{bitbucket_branch}'"
+    )
+    result = await test_case_service.get_test_case(
+        query_text,
+        doc_url=doc_url,
+        jira_url=jira_url,
+        jira_text=jira_text,
+        bitbucket_repo_url=bitbucket_repo_url,
+        bitbucket_branch=bitbucket_branch,
+    )
     return {"result": result}
 
 @app.post("/rebuild_fts_index")
