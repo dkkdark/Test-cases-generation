@@ -44,9 +44,19 @@ class TestCaseFTSIndex:
                 );
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS testcases_meta (
+                    id TEXT PRIMARY KEY,
+                    field_signature TEXT
+                );
+                """
+            )
+            conn.commit()
 
     def rebuild(self, cases: Iterable[Dict[str, Any]]) -> int:
         rows = []
+        meta_rows = []
         for case in cases:
             if not isinstance(case, dict):
                 continue
@@ -54,6 +64,7 @@ class TestCaseFTSIndex:
             if case_id is None:
                 continue
             fields = case.get("fields", "")
+            signature_parts = []
             if isinstance(fields, list):
                 field_pairs = []
                 for item in fields:
@@ -62,6 +73,7 @@ class TestCaseFTSIndex:
                         value = item.get("fieldValue")
                         if name and value:
                             field_pairs.append(f"{name}: {value}")
+                            signature_parts.append(f"{name}={value}")
                 fields_text = "; ".join(field_pairs)
             else:
                 fields_text = str(fields)
@@ -82,12 +94,18 @@ class TestCaseFTSIndex:
                     steps_text,
                 )
             )
+            meta_rows.append((str(case_id), "|".join(signature_parts)))
 
         with sqlite3.connect(self.db_path) as conn:
             conn.execute("DELETE FROM testcases_fts")
             conn.executemany(
                 "INSERT INTO testcases_fts (id, name, fields, precondition, expected_result, steps) VALUES (?, ?, ?, ?, ?, ?)",
                 rows,
+            )
+            conn.execute("DELETE FROM testcases_meta")
+            conn.executemany(
+                "INSERT INTO testcases_meta (id, field_signature) VALUES (?, ?)",
+                meta_rows,
             )
             conn.commit()
         return len(rows)
