@@ -13,7 +13,7 @@ from mcp.server.fastmcp import FastMCP
 from allure_mcp_service import AllureMCPService
 from bitbucket_mcp_service import BitbucketMCPService
 from confluence_mcp_service import ConfluenceMCPService
-from prompts import get_test_case_prompt
+from prompts import get_test_case_prompt, get_test_case_query_only_prompt
 from config import Config
 from fts_index import TestCaseFTSIndex
 from collections import Counter, defaultdict
@@ -46,6 +46,8 @@ class TestCaseService:
             )
         self.prompt = ChatPromptTemplate.from_template(get_test_case_prompt())
         self.chain = self.prompt | self.model
+        self.query_only_prompt = ChatPromptTemplate.from_template(get_test_case_query_only_prompt())
+        self.query_only_chain = self.query_only_prompt | self.model
         self.fts_index = TestCaseFTSIndex()
 
     @staticmethod
@@ -489,6 +491,33 @@ class TestCaseService:
             print(f"[MCP] get_test_case: error {e!r}")
             return f"Error: {str(e)}"
 
+    async def get_test_case_query_only(
+        self,
+        query: str,
+    ) -> str:
+        try:
+            print(f"[MCP] get_test_case_query_only: query='{query}'")
+            effective_query = query.strip() if query and query.strip() else ""
+            search_candidates = self.fts_index.search_detailed(effective_query, limit=20) if effective_query else []
+            ids = [item["id"] for item in search_candidates]
+            cases = await self.mcp_service.get_test_cases_by_ids_async(ids[:20]) if ids else []
+            inferred_fields = self._infer_fields_from_mcp_cases(cases)
+            raw_result = self.query_only_chain.invoke(
+                {
+                    "query": effective_query,
+                    "fields": json.dumps(inferred_fields, ensure_ascii=False),
+                }
+            ).content
+            normalized_result = self._normalize_llm_result(raw_result, inferred_fields=inferred_fields, existing_cases=[])
+            print("[MCP] get_test_case_query_only: LLM response generated")
+            return json.dumps(normalized_result, ensure_ascii=False)
+        except Exception as e:
+            exceptions = getattr(e, "exceptions", None)
+            if exceptions and isinstance(exceptions, list):
+                print(f"[MCP] get_test_case_query_only: error group {exceptions}")
+            print(f"[MCP] get_test_case_query_only: error {e!r}")
+            return f"Error: {str(e)}"
+
     async def rebuild_fts_index(self, size: int = 200) -> str:
         try:
             cases = await self.mcp_service.list_test_cases_for_index_async(size=size)
@@ -569,6 +598,12 @@ async def get_test_case(
     )
 
 @mcp.tool()
+async def get_test_case_query_only(
+    query: str,
+) -> str:
+    return await test_case_service.get_test_case_query_only(query)
+
+@mcp.tool()
 async def rebuild_fts_index(size: int = 200) -> str:
     return await test_case_service.rebuild_fts_index(size=size)
 
@@ -634,6 +669,14 @@ async def http_get_test_case(request: Request):
         bitbucket_repo_url=bitbucket_repo_url,
         bitbucket_branch=bitbucket_branch,
     )
+    return {"result": result}
+
+@app.post("/get_test_case_query_only")
+async def http_get_test_case_query_only(request: Request):
+    data = await request.json()
+    query_text = data.get("query", "")
+    print(f"[HTTP] /get_test_case_query_only query='{query_text}'")
+    result = await test_case_service.get_test_case_query_only(query_text)
     return {"result": result}
 
 @app.post("/rebuild_fts_index")
